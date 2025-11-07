@@ -189,18 +189,18 @@ def scrape_zillow_property(url: str) -> dict:
         print(f"Starting scrape for: {url}")
         driver.get(url)
 
-        # Wait for page to load - increased wait time
+        # Wait for page to load - increased wait time for Railway
         print("Waiting for page to load...")
-        time.sleep(5)  # Longer wait for dynamic content
+        time.sleep(8)  # Longer wait for dynamic content in Docker
 
         # Wait for main content to be present
         try:
-            WebDriverWait(driver, 10).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "main"))
             )
             print("✓ Main content loaded")
-        except:
-            print("⚠ Timeout waiting for main content, continuing...")
+        except Exception as e:
+            print(f"⚠ Timeout waiting for main content: {e}, continuing...")
 
         # Extract address - try multiple selectors
         try:
@@ -248,12 +248,18 @@ def scrape_zillow_property(url: str) -> dict:
         # Extract property details (beds, baths, area)
         try:
             print("Extracting property details...")
+
+            # Wait a bit longer for details to load
+            time.sleep(2)
+
             details_script = """
             const containers = Array.from(document.querySelectorAll('[data-testid="bed-bath-sqft-fact-container"]'));
             return containers.map(el => el.textContent.trim());
             """
 
             bed_bath_items = driver.execute_script(details_script)
+
+            print(f"DEBUG: Found {len(bed_bath_items) if bed_bath_items else 0} detail containers: {bed_bath_items}")
 
             if bed_bath_items and len(bed_bath_items) >= 3:
                 print(f"✓ Found {len(bed_bath_items)} property detail containers")
@@ -285,6 +291,9 @@ def scrape_zillow_property(url: str) -> dict:
         try:
             print("Looking for 'See all' button...")
 
+            # Extra wait for photo carousel to be ready
+            time.sleep(2)
+
             see_all_selectors = [
                 "button[data-testid='see-all-photos']",
                 "button:contains('See all')",
@@ -295,23 +304,27 @@ def scrape_zillow_property(url: str) -> dict:
             for selector in see_all_selectors:
                 try:
                     elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    print(f"DEBUG: Selector '{selector}' found {len(elements)} elements")
                     if elements:
                         elements[0].click()
                         see_all_clicked = True
                         print("✓ Clicked 'See all' button")
-                        time.sleep(0.5)
+                        time.sleep(1.5)  # Longer wait for gallery modal to open
 
                         # Wait for gallery to load
                         try:
-                            WebDriverWait(driver, 5).until(CustomConditions.gallery_loaded())
+                            WebDriverWait(driver, 8).until(CustomConditions.gallery_loaded())
                             print("✓ Gallery appeared")
-                        except:
-                            print("Gallery timeout, continuing...")
+                        except Exception as e:
+                            print(f"Gallery timeout: {e}, continuing...")
 
-                        wait_for_images_loaded(driver, timeout=3, min_images=3)
+                        wait_for_images_loaded(driver, timeout=5, min_images=3)
                         break
-                except:
+                except Exception as e:
+                    print(f"DEBUG: Error with selector '{selector}': {e}")
                     continue
+
+            print(f"DEBUG: see_all_clicked = {see_all_clicked}")
 
             if see_all_clicked:
                 # Scroll through the gallery
@@ -319,14 +332,14 @@ def scrape_zillow_property(url: str) -> dict:
                 try:
                     gallery_container = driver.find_element(By.CSS_SELECTOR, "ul.hollywood-vertical-media-wall-container")
                     driver.execute_script("arguments[0].scrollIntoView(true);", gallery_container)
-                    time.sleep(0.3)
+                    time.sleep(0.5)
 
-                    # Main page scrolls
+                    # Main page scrolls with longer waits
                     for i in range(5):
                         scroll_pos = (i + 1) * 256
                         driver.execute_script(f"window.scrollTo(0, {scroll_pos});")
-                        time.sleep(0.3)
-                        wait_for_images_loaded(driver, timeout=1, min_images=1)
+                        time.sleep(0.5)
+                        wait_for_images_loaded(driver, timeout=2, min_images=1)
 
                     # Scroll through list items
                     list_items = driver.find_elements(By.CSS_SELECTOR, "ul.hollywood-vertical-media-wall-container li")
@@ -335,7 +348,7 @@ def scrape_zillow_property(url: str) -> dict:
                         if i % 10 == 0:  # Scroll every 10 items
                             try:
                                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
-                                time.sleep(0.2)
+                                time.sleep(0.3)
                             except:
                                 pass
                 except Exception as e:
@@ -348,25 +361,29 @@ def scrape_zillow_property(url: str) -> dict:
             # Method 1: From media wall container
             try:
                 media_wall_images = driver.find_elements(By.CSS_SELECTOR, "ul.hollywood-vertical-media-wall-container img")
+                print(f"DEBUG: Method 1 found {len(media_wall_images)} images in media wall")
                 for img in media_wall_images:
                     src = img.get_attribute('src')
                     if src and 'photos.zillowstatic.com' in src:
                         images_set.add(src)
-            except:
-                pass
+            except Exception as e:
+                print(f"DEBUG: Method 1 error: {e}")
 
             # Method 2: All images with zillow photos
             try:
                 all_images = driver.find_elements(By.CSS_SELECTOR, "img[src*='photos.zillowstatic.com']")
+                print(f"DEBUG: Method 2 found {len(all_images)} zillow images")
                 for img in all_images:
                     src = img.get_attribute('src')
                     if src and 'photos.zillowstatic.com' in src and 'placeholder' not in src.lower():
                         images_set.add(src)
-            except:
-                pass
+            except Exception as e:
+                print(f"DEBUG: Method 2 error: {e}")
 
             property_data['images'] = sorted(list(images_set))
             print(f"✓ Found {len(property_data['images'])} unique images")
+            if len(property_data['images']) > 0:
+                print(f"DEBUG: First image URL: {property_data['images'][0]}")
 
         except Exception as e:
             print(f"Error extracting images: {e}")
