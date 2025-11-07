@@ -171,7 +171,13 @@ def scrape_zillow_property(url: str) -> dict:
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-    service = Service(ChromeDriverManager().install())
+    # Use system chromedriver if available (Docker), otherwise download
+    chromedriver_path = os.getenv('CHROMEDRIVER_PATH')
+    if chromedriver_path and os.path.exists(chromedriver_path):
+        service = Service(chromedriver_path)
+    else:
+        service = Service(ChromeDriverManager().install())
+
     driver = webdriver.Chrome(service=service, options=options)
 
     property_data = {
