@@ -32,7 +32,13 @@ env/
 
 # Project specific
 zillow_data.json
+scraped_property_*.json
 *.log
+.env
+
+# OS
+.DS_Store
+Thumbs.db
 
 # BMAD - Keep customizations, ignore generated docs
 bmad/_cfg/agents/

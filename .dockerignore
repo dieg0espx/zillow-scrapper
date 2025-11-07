@@ -1,0 +1,52 @@
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Environment variables (will be set in Railway)
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files
+*.json
+scraped_property_*.json
+
+# Documentation
+*.md
+BMAD_*.md
+
+# Test files
+test_*.py
+example_client.py
+debug_*.py
+
+# Logs
+*.log
+
+# Database setup scripts (not needed in production)
+setup_database.py
+fix_table.py
+create_table.sql
