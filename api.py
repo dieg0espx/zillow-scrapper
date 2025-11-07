@@ -2,6 +2,7 @@
 FastAPI application for scraping Zillow properties
 """
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -25,6 +26,15 @@ app = FastAPI(
     title="Zillow Property Scraper API",
     description="API for scraping Zillow property data including images, price, and details",
     version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],  # Your frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Initialize Supabase client
@@ -164,12 +174,15 @@ def scrape_zillow_property(url: str) -> dict:
 
     # Setup Chrome options
     options = webdriver.ChromeOptions()
-    options.add_argument('--headless=new')  # Use new headless mode
+    # options.add_argument('--headless=new')  # Use new headless mode - DISABLED to see browser
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
 
     # Use system chromedriver if available (Docker), otherwise download
     chromedriver_path = os.getenv('CHROMEDRIVER_PATH')
@@ -179,6 +192,9 @@ def scrape_zillow_property(url: str) -> dict:
         service = Service(ChromeDriverManager().install())
 
     driver = webdriver.Chrome(service=service, options=options)
+
+    # Remove webdriver property to avoid detection
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
     property_data = {
         'url': url,
@@ -295,8 +311,8 @@ def scrape_zillow_property(url: str) -> dict:
             time.sleep(2)
 
             see_all_selectors = [
+                "button[data-testid='gallery-see-all-photos-button']",
                 "button[data-testid='see-all-photos']",
-                "button:contains('See all')",
                 "button[aria-label*='See all']"
             ]
 
@@ -327,63 +343,137 @@ def scrape_zillow_property(url: str) -> dict:
             print(f"DEBUG: see_all_clicked = {see_all_clicked}")
 
             if see_all_clicked:
-                # Scroll through the gallery
-                print("Scrolling gallery...")
+                # Comprehensive scrolling strategy to load all images
+                print("Starting comprehensive scrolling strategy...")
                 try:
-                    gallery_container = driver.find_element(By.CSS_SELECTOR, "ul.hollywood-vertical-media-wall-container")
-                    driver.execute_script("arguments[0].scrollIntoView(true);", gallery_container)
-                    time.sleep(0.5)
+                    # Find the media wall container
+                    media_wall_selectors = [
+                        "ul.hollywood-vertical-media-wall-container",
+                        ".StyledVerticalMediaWall-fshdp-8-111-1__sc-1liu0fm-3.bsYjqc.hollywood-vertical-media-wall-container"
+                    ]
 
-                    # Main page scrolls with longer waits
-                    for i in range(5):
-                        scroll_pos = (i + 1) * 256
-                        driver.execute_script(f"window.scrollTo(0, {scroll_pos});")
-                        time.sleep(0.5)
-                        wait_for_images_loaded(driver, timeout=2, min_images=1)
+                    media_wall = None
+                    for selector in media_wall_selectors:
+                        try:
+                            media_wall = driver.find_element(By.CSS_SELECTOR, selector)
+                            print(f"Found media wall container: {selector}")
+                            break
+                        except:
+                            continue
 
-                    # Scroll through list items
-                    list_items = driver.find_elements(By.CSS_SELECTOR, "ul.hollywood-vertical-media-wall-container li")
-                    print(f"Found {len(list_items)} list items")
-                    for i, item in enumerate(list_items):
-                        if i % 10 == 0:  # Scroll every 10 items
+                    if media_wall:
+                        # Strategy 1: Scroll through each list item individually
+                        print("Strategy 1: Scrolling through each list item...")
+                        list_items = media_wall.find_elements(By.CSS_SELECTOR, "li")
+                        print(f"Found {len(list_items)} list items in media wall")
+
+                        # Scroll to each list item to trigger lazy loading
+                        for i, item in enumerate(list_items):
                             try:
-                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
-                                time.sleep(0.3)
+                                driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", item)
+                                print(f"Scrolled to list item {i+1}/{len(list_items)}")
+                                time.sleep(0.5)  # Wait for images to load
                             except:
-                                pass
+                                continue
+
+                        # Strategy 2: Scroll the media wall container with 5 stops
+                        print("Strategy 2: Scrolling media wall container with 5 stops...")
+                        media_wall_height = driver.execute_script("return arguments[0].scrollHeight", media_wall)
+                        scroll_positions = [media_wall_height * 0.2, media_wall_height * 0.4,
+                                          media_wall_height * 0.6, media_wall_height * 0.8,
+                                          media_wall_height]
+
+                        for i, position in enumerate(scroll_positions):
+                            driver.execute_script("arguments[0].scrollTop = arguments[1];", media_wall, int(position))
+                            print(f"Media wall scroll stop {i+1}/5 at {int(position)}px...")
+                            time.sleep(1)
+
+                        # Strategy 3: Final scroll to bottom and back to top
+                        print("Strategy 3: Final scroll to bottom and back to top...")
+                        driver.execute_script("arguments[0].scrollTo(0, arguments[0].scrollHeight);", media_wall)
+                        time.sleep(2)
+                        driver.execute_script("arguments[0].scrollTo(0, 0);", media_wall)
+                        time.sleep(1)
+                    else:
+                        print("Media wall container not found, using fallback scrolling...")
+                        # Fallback: scroll main page
+                        page_height = driver.execute_script("return document.body.scrollHeight")
+                        for i in range(0, 5):
+                            position = page_height * (i + 1) / 5
+                            driver.execute_script(f"window.scrollTo(0, {int(position)});")
+                            time.sleep(1)
+
                 except Exception as e:
                     print(f"Scrolling error: {e}")
 
-            # Extract all image URLs
-            print("Extracting image URLs...")
-            images_set = set()
+            # Extract all image URLs from specific div only
+            print("Extracting image URLs from StyledVerticalMediaWall container...")
+            image_urls = []
 
-            # Method 1: From media wall container
+            # Extract images only from the specific media wall container
             try:
-                media_wall_images = driver.find_elements(By.CSS_SELECTOR, "ul.hollywood-vertical-media-wall-container img")
-                print(f"DEBUG: Method 1 found {len(media_wall_images)} images in media wall")
-                for img in media_wall_images:
-                    src = img.get_attribute('src')
-                    if src and 'photos.zillowstatic.com' in src:
-                        images_set.add(src)
-            except Exception as e:
-                print(f"DEBUG: Method 1 error: {e}")
+                # Try multiple selectors for the media wall
+                media_wall_selectors = [
+                    "ul.hollywood-vertical-media-wall-container",
+                    ".StyledVerticalMediaWall-fshdp-8-111-1__sc-1liu0fm-3.bsYjqc.hollywood-vertical-media-wall-container"
+                ]
 
-            # Method 2: All images with zillow photos
-            try:
-                all_images = driver.find_elements(By.CSS_SELECTOR, "img[src*='photos.zillowstatic.com']")
-                print(f"DEBUG: Method 2 found {len(all_images)} zillow images")
-                for img in all_images:
-                    src = img.get_attribute('src')
-                    if src and 'photos.zillowstatic.com' in src and 'placeholder' not in src.lower():
-                        images_set.add(src)
-            except Exception as e:
-                print(f"DEBUG: Method 2 error: {e}")
+                media_wall = None
+                for selector in media_wall_selectors:
+                    try:
+                        media_wall = driver.find_element(By.CSS_SELECTOR, selector)
+                        print(f"Found media wall for extraction: {selector}")
+                        break
+                    except:
+                        continue
 
-            property_data['images'] = sorted(list(images_set))
-            print(f"✓ Found {len(property_data['images'])} unique images")
-            if len(property_data['images']) > 0:
-                print(f"DEBUG: First image URL: {property_data['images'][0]}")
+                if media_wall:
+                    # Get all images within the media wall
+                    media_wall_images = media_wall.find_elements(By.CSS_SELECTOR, "img")
+                    print(f"Found {len(media_wall_images)} images in media wall container")
+
+                    for img in media_wall_images:
+                        src = img.get_attribute('src')
+                        if src and 'http' in src:
+                            image_urls.append(src)
+
+                    # Also check for images in list items
+                    list_items = media_wall.find_elements(By.CSS_SELECTOR, "li")
+                    for li in list_items:
+                        li_images = li.find_elements(By.CSS_SELECTOR, "img")
+                        for img in li_images:
+                            src = img.get_attribute('src')
+                            if src and 'http' in src and src not in image_urls:
+                                image_urls.append(src)
+
+                    print(f"Total images found before filtering: {len(image_urls)}")
+                else:
+                    print("WARNING: Media wall container not found!")
+
+            except Exception as e:
+                print(f"Error extracting from media wall: {e}")
+
+            # Filter to get only high-quality property photos
+            unique_images = []
+            for url in image_urls:
+                if (url not in unique_images and
+                    len(url) > 50 and
+                    'photos.zillowstatic.com' in url and  # Only Zillow property photos
+                    ('.jpg' in url or '.jpeg' in url) and  # Only JPG images
+                    'cc_ft_' in url and  # Only main property photos (cc_ft_)
+                    '-p_e.jpg' not in url and  # Exclude placeholder images
+                    '-h_e.jpg' not in url and  # Exclude header images
+                    'zillow_web_logo' not in url and  # Exclude logo images
+                    '-p_i.jpg' not in url and  # Exclude icon images
+                    '-p_c.jpg' not in url):  # Exclude other non-property images
+                    unique_images.append(url)
+
+            property_data['images'] = unique_images
+            print(f"✓ Found {len(property_data['images'])} filtered property images")
+
+            # Print first few image URLs for verification
+            for i, img_url in enumerate(property_data['images'][:3]):
+                print(f"  Image {i+1}: {img_url[:80]}...")
 
         except Exception as e:
             print(f"Error extracting images: {e}")
