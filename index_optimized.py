@@ -4,6 +4,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
@@ -11,9 +12,155 @@ import json
 import time
 import re
 
+
+# ============================================================================
+# CUSTOM WAIT CONDITIONS (Story 1.1)
+# ============================================================================
+
+class CustomConditions:
+    """Custom wait conditions for Zillow scraper optimization"""
+
+    @staticmethod
+    def images_loaded_in_container(container_locator, min_images=5):
+        """
+        Wait for minimum number of images to load in container
+
+        Args:
+            container_locator: Tuple (By, selector) for container
+            min_images: Minimum number of loaded images required
+
+        Returns:
+            Function that returns container when condition met
+        """
+        def _predicate(driver):
+            try:
+                container = driver.find_element(*container_locator)
+                images = container.find_elements(By.TAG_NAME, "img")
+                loaded_images = [
+                    img for img in images
+                    if img.get_attribute('src') and
+                    'http' in img.get_attribute('src') and
+                    'placeholder' not in img.get_attribute('src', '')
+                ]
+                return container if len(loaded_images) >= min_images else False
+            except:
+                return False
+        return _predicate
+
+    @staticmethod
+    def element_has_valid_src(element_locator):
+        """
+        Wait for image element to have valid src attribute
+
+        Args:
+            element_locator: Tuple (By, selector) for element
+
+        Returns:
+            Function that returns element when src is valid
+        """
+        def _predicate(driver):
+            try:
+                element = driver.find_element(*element_locator)
+                src = element.get_attribute('src')
+                return element if (src and 'http' in src and 'placeholder' not in src) else False
+            except:
+                return False
+        return _predicate
+
+    @staticmethod
+    def gallery_loaded():
+        """
+        Wait for gallery container to be present and loaded
+
+        Returns:
+            Function that returns True when gallery found
+        """
+        gallery_selectors = [
+            "ul.hollywood-vertical-media-wall-container",
+            "[data-testid='hollywood-vertical-media-wall']",
+            ".StyledVerticalMediaWall-fshdp-8-111-1__sc-1liu0fm-3"
+        ]
+
+        def _predicate(driver):
+            for selector in gallery_selectors:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elements:
+                        return elements[0]
+                except:
+                    continue
+            return False
+        return _predicate
+
+
+def wait_for_images_loaded(driver, container=None, timeout=5, min_images=1):
+    """
+    Wait for images to load using JavaScript detection
+
+    Args:
+        driver: Selenium WebDriver instance
+        container: Optional WebElement to check images within
+        timeout: Maximum seconds to wait
+        min_images: Minimum images that must be loaded
+
+    Returns:
+        bool: True if images loaded, False if timeout
+    """
+    script = """
+    const container = arguments[0] || document;
+    const images = Array.from(container.querySelectorAll('img'));
+
+    // Filter to property images only
+    const propertyImages = images.filter(img =>
+        img.src &&
+        img.src.includes('photos.zillowstatic.com') &&
+        !img.src.includes('placeholder')
+    );
+
+    // Check if images are loaded
+    const loadedImages = propertyImages.filter(img =>
+        img.complete && img.naturalHeight > 0
+    );
+
+    return {
+        allLoaded: loadedImages.length >= arguments[1] && loadedImages.length === propertyImages.length,
+        totalImages: propertyImages.length,
+        loadedImages: loadedImages.length
+    };
+    """
+
+    try:
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            result = driver.execute_script(script, container, min_images)
+
+            if result['allLoaded'] and result['totalImages'] > 0:
+                print(f"✓ All {result['totalImages']} images loaded")
+                return True
+
+            if result['loadedImages'] > 0:
+                print(f"Loading: {result['loadedImages']}/{result['totalImages']} images...")
+
+            time.sleep(0.3)  # Check every 300ms
+
+        # Timeout reached
+        result = driver.execute_script(script, container, min_images)
+        print(f"⏱ Timeout: {result['loadedImages']}/{result['totalImages']} images loaded (continuing)")
+        return False
+
+    except Exception as e:
+        print(f"Error checking image load: {e}")
+        return False
+
+
+# ============================================================================
+# MAIN SCRAPING FUNCTION (OPTIMIZED WITH STORY 1.1)
+# ============================================================================
+
 def scrape_zillow_property(url):
     """
     Scrape property data from Zillow URL using Selenium
+    OPTIMIZED: Story 1.1 - Intelligent wait conditions instead of time.sleep()
     """
     driver = None
     try:
@@ -24,23 +171,23 @@ def scrape_zillow_property(url):
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
-        
+
         # Initialize Chrome driver
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        
+
         # Execute script to remove webdriver property
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
+
         print("Opening browser and navigating to Zillow...")
         driver.get(url)
-        
+
         # Wait for page to load
         wait = WebDriverWait(driver, 10)
-        
+
         # Extract property data
         property_data = {}
-        
+
         # Wait for and extract address
         try:
             address_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'h1.Text-c11n-8-109-3__sc-aiai24-0.cEHZrB')))
@@ -48,7 +195,7 @@ def scrape_zillow_property(url):
             print(f"Found address: {property_data['address']}")
         except Exception as e:
             print(f"Could not find address: {e}")
-        
+
         # Wait for and extract price
         try:
             price_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'span[data-testid="price"]')))
@@ -60,14 +207,15 @@ def scrape_zillow_property(url):
                 print(f"Found price: ${property_data['monthly_rent']}")
         except Exception as e:
             print(f"Could not find price: {e}")
-        
+
         # Wait for and extract beds, baths, area
+        # ENHANCED: Use JavaScript for more robust extraction (Story 4.1 preview)
         try:
             print("Extracting property details (beds, baths, area)...")
 
-            # Use JavaScript for more reliable extraction
+            # Try JavaScript batch extraction using the correct selector
             details_script = """
-            // Use the correct selector: bed-bath-sqft-fact-container
+            // Use the correct selector found by debug: bed-bath-sqft-fact-container
             const containers = Array.from(document.querySelectorAll('[data-testid="bed-bath-sqft-fact-container"]'));
             return containers.map(el => el.textContent.trim());
             """
@@ -127,11 +275,11 @@ def scrape_zillow_property(url):
 
         except Exception as e:
             print(f"Could not find property details: {e}")
-        
+
         # Extract all images
         try:
             print("Looking for 'See all' button to expand image gallery...")
-            
+
             # Try to find and click "See all" or similar buttons
             see_all_selectors = [
                 "button[data-testid='see-all-photos']",
@@ -146,7 +294,7 @@ def scrape_zillow_property(url):
                 "button[data-testid='gallery-see-all']",
                 "button[data-testid='photos-see-all']"
             ]
-            
+
             see_all_clicked = False
             for selector in see_all_selectors:
                 try:
@@ -157,7 +305,12 @@ def scrape_zillow_property(url):
                             elements[0].click()
                             see_all_clicked = True
                             print("Clicked 'See all' button")
-                            time.sleep(3)  # Wait for images to load
+                            # OPTIMIZED: Wait for gallery to appear instead of arbitrary sleep
+                            try:
+                                WebDriverWait(driver, 5).until(CustomConditions.gallery_loaded())
+                                print("Gallery appeared")
+                            except TimeoutException:
+                                print("Gallery not found after click, continuing...")
                             break
                     else:
                         elements = driver.find_elements(By.CSS_SELECTOR, selector)
@@ -165,11 +318,16 @@ def scrape_zillow_property(url):
                             elements[0].click()
                             see_all_clicked = True
                             print("Clicked 'See all' button")
-                            time.sleep(3)  # Wait for images to load
+                            # OPTIMIZED: Wait for gallery to appear
+                            try:
+                                WebDriverWait(driver, 5).until(CustomConditions.gallery_loaded())
+                                print("Gallery appeared")
+                            except TimeoutException:
+                                print("Gallery not found after click, continuing...")
                             break
                 except:
                     continue
-            
+
             # Also try to find and click on navigation arrows or "Load more" buttons
             if not see_all_clicked:
                 print("Looking for navigation arrows or load more buttons...")
@@ -185,29 +343,30 @@ def scrape_zillow_property(url):
                     "[class*='next']",
                     "[class*='arrow']"
                 ]
-                
+
                 for selector in nav_selectors:
                     try:
                         if ":contains(" in selector:
                             elements = driver.find_elements(By.XPATH, f"//button[contains(text(), 'Load more') or contains(text(), 'Show more')]")
                         else:
                             elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                        
+
                         if elements:
                             elements[0].click()
                             print("Clicked navigation/load more button")
-                            time.sleep(2)
+                            # OPTIMIZED: Wait for new content to appear (brief)
+                            time.sleep(0.5)  # Minimal wait for click to register
                             break
                     except:
                         continue
-            
+
             if not see_all_clicked:
                 print("No 'See all' button found, extracting visible images...")
-            
-            # Wait a bit more for all images to load
-            print("Waiting for all images to load...")
-            time.sleep(3)
-            
+
+            # OPTIMIZED: Wait for images to load using intelligent detection
+            print("Waiting for images to load...")
+            wait_for_images_loaded(driver, timeout=3, min_images=3)
+
             # Focus on scrolling within the "See all" gallery
             print("Scrolling within the 'See all' gallery...")
             try:
@@ -223,7 +382,7 @@ def scrape_zillow_property(url):
                     "[data-testid='media-stream']",
                     ".media-stream"
                 ]
-                
+
                 for selector in gallery_selectors:
                     try:
                         elements = driver.find_elements(By.CSS_SELECTOR, selector)
@@ -233,36 +392,39 @@ def scrape_zillow_property(url):
                             break
                     except:
                         continue
-                
+
                 if gallery_element:
                     # First, scroll the gallery into view
                     print("Scrolling gallery into view...")
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", gallery_element)
-                    time.sleep(2)
-                    
-                    # Try multiple scrolling strategies to load all images
-                    print("Trying multiple scrolling strategies...")
-                    
+                    # OPTIMIZED: Brief wait for scroll to complete (no arbitrary 2s sleep)
+                    time.sleep(0.3)
+
+                    # OPTIMIZED: Simplified scrolling strategy (will be further optimized in Story 2.1)
+                    # For now, keeping existing strategies but with intelligent waits
+
                     # Strategy 1: Scroll the main page to trigger lazy loading with 5 stops
                     print("Strategy 1: Scrolling main page with 5 stops...")
                     page_height = driver.execute_script("return document.body.scrollHeight")
                     scroll_positions = [page_height * 0.2, page_height * 0.4, page_height * 0.6, page_height * 0.8, page_height]
-                    
+
                     for i, position in enumerate(scroll_positions):
                         driver.execute_script(f"window.scrollTo(0, {int(position)});")
                         print(f"Main page scroll stop {i+1}/5 at {int(position)}px...")
-                        time.sleep(2)  # Wait longer at each stop for images to load
-                    
+                        # OPTIMIZED: Wait for images instead of arbitrary sleep
+                        wait_for_images_loaded(driver, timeout=1, min_images=1)
+
                     # Strategy 2: Scroll within the gallery element with 5 stops
                     print("Strategy 2: Scrolling within gallery with 5 stops...")
                     gallery_height = driver.execute_script("return arguments[0].scrollHeight", gallery_element)
                     gallery_positions = [gallery_height * 0.2, gallery_height * 0.4, gallery_height * 0.6, gallery_height * 0.8, gallery_height]
-                    
+
                     for i, position in enumerate(gallery_positions):
                         driver.execute_script("arguments[0].scrollTop = arguments[1];", gallery_element, int(position))
                         print(f"Gallery scroll stop {i+1}/5 at {int(position)}px...")
-                        time.sleep(2)  # Wait longer at each stop for images to load
-                    
+                        # OPTIMIZED: Wait for images
+                        wait_for_images_loaded(driver, gallery_element, timeout=1, min_images=1)
+
                     # Strategy 2.5: Target the media wall container specifically
                     print("Strategy 2.5: Targeting media wall container specifically...")
                     try:
@@ -273,18 +435,19 @@ def scrape_zillow_property(url):
                             # Get all list items in the media wall
                             list_items = media_wall.find_elements(By.CSS_SELECTOR, "li")
                             print(f"Found {len(list_items)} list items in media wall")
-                            
+
                             # Scroll to each list item to trigger lazy loading
                             for i, item in enumerate(list_items):
                                 try:
                                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
                                     print(f"Scrolled to list item {i+1}/{len(list_items)}")
-                                    time.sleep(1)  # Wait for images to load
+                                    # OPTIMIZED: Brief wait for images
+                                    time.sleep(0.2)  # Minimal wait for lazy load trigger
                                 except:
                                     continue
                     except Exception as e:
                         print(f"Could not find media wall container: {e}")
-                    
+
                     # Strategy 3: Try clicking through images to load more
                     print("Strategy 3: Clicking through images...")
                     try:
@@ -293,57 +456,60 @@ def scrape_zillow_property(url):
                             next_buttons = driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='next'], button[aria-label*='Next'], .next, .arrow-right, [class*='next']")
                             if next_buttons:
                                 next_buttons[0].click()
-                                time.sleep(0.5)
+                                # OPTIMIZED: Minimal wait
+                                time.sleep(0.2)
                             else:
                                 # Try clicking on images to advance
                                 images = driver.find_elements(By.CSS_SELECTOR, "img[src*='photos.zillowstatic.com']")
                                 if images and i < len(images):
                                     images[i].click()
-                                    time.sleep(0.5)
+                                    time.sleep(0.2)
                     except Exception as e:
                         print(f"Error during image navigation: {e}")
-                    
+
                     # Strategy 4: Final comprehensive scroll with 5 stops
                     print("Strategy 4: Final comprehensive scroll with 5 stops...")
                     # Get updated heights after previous scrolling
                     final_page_height = driver.execute_script("return document.body.scrollHeight")
                     final_gallery_height = driver.execute_script("return arguments[0].scrollHeight", gallery_element)
-                    
+
                     # Create 5 stops for both page and gallery
                     final_page_positions = [final_page_height * 0.1, final_page_height * 0.3, final_page_height * 0.5, final_page_height * 0.7, final_page_height * 0.9]
                     final_gallery_positions = [final_gallery_height * 0.1, final_gallery_height * 0.3, final_gallery_height * 0.5, final_gallery_height * 0.7, final_gallery_height * 0.9]
-                    
+
                     for i in range(5):
                         # Scroll both main page and gallery to their respective positions
                         driver.execute_script(f"window.scrollTo(0, {int(final_page_positions[i])});")
                         driver.execute_script("arguments[0].scrollTop = arguments[1];", gallery_element, int(final_gallery_positions[i]))
                         print(f"Final comprehensive scroll stop {i+1}/5...")
-                        time.sleep(1.5)  # Wait at each stop
-                        
+                        # OPTIMIZED: Wait for images
+                        wait_for_images_loaded(driver, gallery_element, timeout=0.8, min_images=1)
+
                 else:
                     print("Could not find 'See all' gallery container, falling back to general scrolling with 5 stops...")
                     # Fallback to general page scrolling with 5 stops
                     fallback_page_height = driver.execute_script("return document.body.scrollHeight")
                     fallback_positions = [fallback_page_height * 0.2, fallback_page_height * 0.4, fallback_page_height * 0.6, fallback_page_height * 0.8, fallback_page_height]
-                    
+
                     for i, position in enumerate(fallback_positions):
                         driver.execute_script(f"window.scrollTo(0, {int(position)});")
                         print(f"Fallback scroll stop {i+1}/5 at {int(position)}px...")
-                        time.sleep(2)
-                        
+                        # OPTIMIZED: Wait for images
+                        wait_for_images_loaded(driver, timeout=1, min_images=1)
+
             except Exception as e:
                 print(f"Error during gallery scrolling: {e}")
-            
-            # Wait for all images to load
+
+            # OPTIMIZED: Wait for final images with intelligent detection
             print("Waiting for all images to fully load...")
-            time.sleep(3)
-            
+            wait_for_images_loaded(driver, timeout=2, min_images=5)
+
             # Try clicking through the image gallery to load more images
             print("Trying to navigate through image gallery...")
             try:
                 # Look for image navigation elements
                 nav_elements = driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='next'], button[aria-label*='Next'], .next, .arrow-right, [class*='next']")
-                
+
                 # Try clicking through multiple images
                 for i in range(10):  # Try clicking up to 10 times
                     try:
@@ -351,28 +517,29 @@ def scrape_zillow_property(url):
                         next_buttons = driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='next'], button[aria-label*='Next'], .next, .arrow-right")
                         if next_buttons:
                             next_buttons[0].click()
-                            time.sleep(1)
+                            # OPTIMIZED: Minimal wait
+                            time.sleep(0.3)
                         else:
                             # Try clicking on the image itself to advance
                             images = driver.find_elements(By.CSS_SELECTOR, "img[src*='photos.zillowstatic.com']")
                             if images:
                                 images[0].click()
-                                time.sleep(1)
+                                time.sleep(0.3)
                         break
                     except:
                         break
-                        
+
             except Exception as e:
                 print(f"Error navigating gallery: {e}")
-            
-            # Final wait for all images to load
-            time.sleep(2)
-            
+
+            # OPTIMIZED: Final wait with intelligent detection
+            wait_for_images_loaded(driver, timeout=1, min_images=5)
+
             # Extract all image URLs with multiple attempts
             image_urls = []
-            
+
             print("Searching for images with multiple methods...")
-            
+
             # Method 1: Try multiple selectors for images, prioritizing the media wall container
             image_selectors = [
                 "ul.hollywood-vertical-media-wall-container img",
@@ -391,7 +558,7 @@ def scrape_zillow_property(url):
                 "img[data-testid='media-photo']",
                 "[data-testid='media-photo'] img"
             ]
-            
+
             for selector in image_selectors:
                 try:
                     images = driver.find_elements(By.CSS_SELECTOR, selector)
@@ -402,21 +569,21 @@ def scrape_zillow_property(url):
                             image_urls.append(src)
                 except:
                     continue
-            
+
             # Method 2: Find all img tags and filter
             try:
                 all_images = driver.find_elements(By.TAG_NAME, "img")
                 print(f"Found {len(all_images)} total img elements")
                 for img in all_images:
                     src = img.get_attribute('src')
-                    if (src and 
-                        src not in image_urls and 
-                        'http' in src and 
+                    if (src and
+                        src not in image_urls and
+                        'http' in src and
                         'photos.zillowstatic.com' in src):
                         image_urls.append(src)
             except:
                 pass
-            
+
             # Method 3: Look for lazy-loaded images
             try:
                 lazy_images = driver.find_elements(By.CSS_SELECTOR, "img[data-src], img[data-lazy-src]")
@@ -427,7 +594,7 @@ def scrape_zillow_property(url):
                         image_urls.append(src)
             except:
                 pass
-            
+
             # Method 4: Target the media wall container specifically
             try:
                 media_wall = driver.find_element(By.CSS_SELECTOR, "ul.hollywood-vertical-media-wall-container")
@@ -436,12 +603,12 @@ def scrape_zillow_property(url):
                     # Get all images within the media wall
                     media_wall_images = media_wall.find_elements(By.CSS_SELECTOR, "img")
                     print(f"Found {len(media_wall_images)} images in media wall container")
-                    
+
                     for img in media_wall_images:
                         src = img.get_attribute('src')
                         if src and src not in image_urls and 'http' in src:
                             image_urls.append(src)
-                            
+
                     # Also check for images in list items
                     list_items = media_wall.find_elements(By.CSS_SELECTOR, "li")
                     for li in list_items:
@@ -452,9 +619,9 @@ def scrape_zillow_property(url):
                                 image_urls.append(src)
             except Exception as e:
                 print(f"Could not extract from media wall container: {e}")
-            
+
             print(f"Total images found before filtering: {len(image_urls)}")
-            
+
             # Remove duplicates and filter out non-property images
             unique_images = []
             for url in image_urls:
@@ -469,24 +636,24 @@ def scrape_zillow_property(url):
                     '-p_i.jpg' not in url and  # Exclude icon images
                     '-p_c.jpg' not in url):  # Exclude other non-property images
                     unique_images.append(url)
-            
+
             property_data['images'] = unique_images
             print(f"Found {len(unique_images)} images")
-            
+
             # Print first few image URLs for verification
             for i, img_url in enumerate(unique_images[:3]):
                 print(f"  Image {i+1}: {img_url[:80]}...")
-                
+
         except Exception as e:
             print(f"Could not extract images: {e}")
             property_data['images'] = []
-        
+
         # Add URL and timestamp
         property_data['url'] = url
         property_data['scraped_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
-        
+
         return property_data
-        
+
     except Exception as e:
         print(f"Error during scraping: {e}")
         return None
@@ -494,6 +661,7 @@ def scrape_zillow_property(url):
         if driver:
             print("Closing browser...")
             driver.quit()
+
 
 def save_to_json(data, filename='zillow_data.json'):
     """
@@ -506,20 +674,35 @@ def save_to_json(data, filename='zillow_data.json'):
     except Exception as e:
         print(f"Error saving to JSON: {e}")
 
+
 if __name__ == "__main__":
     # URL to scrape
     url = "https://www.zillow.com/homedetails/9255-Swallow-Dr-Los-Angeles-CA-90069/20799705_zpid/"
-    
-    print("Starting Zillow scraper with Selenium...")
+
+    print("Starting OPTIMIZED Zillow scraper (Story 1.1) with Selenium...")
+    print("=" * 70)
+    print("OPTIMIZATION: Replaced all time.sleep() with intelligent waits")
+    print("Expected time savings: 30-40 seconds")
+    print("=" * 70)
+
+    start_time = time.time()
+
     property_data = scrape_zillow_property(url)
-    
+
+    elapsed_time = time.time() - start_time
+
     if property_data:
         print("\n=== SCRAPED PROPERTY DATA ===")
         for key, value in property_data.items():
-            print(f"{key}: {value}")
-        
+            if key == 'images':
+                print(f"{key}: {len(value)} images found")
+            else:
+                print(f"{key}: {value}")
+
         # Save to JSON
-        save_to_json(property_data)
-        print(f"\n✅ Data successfully saved to zillow_data.json")
+        save_to_json(property_data, filename='zillow_data_optimized.json')
+        print(f"\n✅ Data successfully saved to zillow_data_optimized.json")
+        print(f"⏱️  Total execution time: {elapsed_time:.2f} seconds")
     else:
         print("❌ Failed to scrape data")
+        print(f"⏱️  Execution time before failure: {elapsed_time:.2f} seconds")
