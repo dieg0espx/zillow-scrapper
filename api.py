@@ -395,6 +395,7 @@ def scrape_zillow_property(url: str) -> dict:
 
 
 @app.get("/")
+@app.head("/")
 async def root():
     """Root endpoint with API information"""
     return {
@@ -408,6 +409,7 @@ async def root():
 
 
 @app.get("/health")
+@app.head("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
